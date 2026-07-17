@@ -1,0 +1,31 @@
+[package]
+name = "wallgen"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Generate deterministic generative-art desktop wallpapers seeded by the date. Same day, same wallpaper, everywhere. Fast Rust CLI."
+authors = ["printemps.tokyo <develop@printemps.tokyo>"]
+repository = "https://github.com/printemps-tokyo/wallgen"
+homepage = "https://github.com/printemps-tokyo/wallgen"
+readme = "README.md"
+keywords = ["wallpaper", "generative-art", "cli", "procedural", "deterministic"]
+categories = ["command-line-utilities", "multimedia::images"]
+
+[[bin]]
+name = "wallgen"
+path = "src/main.rs"
+
+[lib]
+name = "wallgen"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+panic = "abort"
