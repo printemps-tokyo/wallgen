@@ -2,6 +2,7 @@
 name = "wallgen"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.88"
 license = "MIT"
 description = "Generate deterministic generative-art desktop wallpapers seeded by the date. Same day, same wallpaper, everywhere. Fast Rust CLI."
 authors = ["printemps.tokyo <develop@printemps.tokyo>"]
