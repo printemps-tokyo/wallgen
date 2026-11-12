@@ -48,6 +48,9 @@ wallgen --seed 1234 --style voronoi      # any integer seed
 wallgen --size 5120x2880 -o today.png    # explicit size and output path
 wallgen --list-styles                    # show styles
 wallgen --list-palettes                  # show palettes and their colors
+wallgen --style any                      # let the seed pick from every style
+wallgen --set                            # write it and make it the wallpaper
+wallgen --show-set                       # print what --set would run
 ```
 
 By default the file is named `wallgen-YYYYMMDD-<style>.png` in the current
@@ -55,7 +58,7 @@ directory. The run summary (size, style, palette, seed) is printed to stderr.
 
 ## Styles
 
-Pass `--style <name>`, or `--style random` to let the seed choose one.
+Pass `--style <name>`, `--style random` (the default), or `--style any`.
 
 | Style | Description |
 | --- | --- |
@@ -63,6 +66,16 @@ Pass `--style <name>`, or `--style random` to let the seed choose one.
 | `voronoi` | Colored Voronoi cells (self-implemented nearest-site) with soft shading |
 | `waves` | Interference of several sine wave fields, mapped through the palette |
 | `bauhaus` | A grid of bold geometric shapes (circles, arcs, triangles, bars) |
+| `topo` | A topographic map: elevation bands with antialiased contour lines, every fifth one heavier |
+| `truchet` | Truchet tiles: quarter-circle arcs that link up into long winding paths |
+| `mesh` | A soft mesh gradient of blended color blobs, dithered against banding |
+| `circles` | Circle packing with a grid-accelerated search, some circles with a concentric disc |
+
+`--style random` lets the seed pick from the first four styles only. That pool
+is frozen, so a date keeps the same wallpaper when new styles are added in
+later versions. `--style any` lets the seed pick from every style; its choice
+for a date can change when a version adds styles. `--list-styles` marks the
+styles that `random` never picks.
 
 Each style lives in its own module, so more can be added over time.
 
@@ -100,32 +113,65 @@ PNG by default. Use `--format png|jpg|webp`, or give `-o` a path whose extension
 selects the encoder. JPEG has no alpha channel and is encoded from flattened
 RGB.
 
+## Setting the wallpaper
+
+```bash
+wallgen --size 5k --set                  # detect the desktop and set it
+wallgen --set --desktop xfce             # name the desktop yourself
+wallgen --show-set                       # print the commands, run nothing
+```
+
+wallgen only ever touches your desktop when you pass `--set`. It writes the
+image first, then runs the desktop's own tool with the absolute path:
+
+| Desktop | `--desktop` | What `--set` runs |
+| --- | --- | --- |
+| macOS | `macos` | `osascript`: System Events sets the picture of every desktop |
+| Windows | `windows` | PowerShell calls `SystemParametersInfoW` with `SPI_SETDESKWALLPAPER`, saving the change to the user profile |
+| GNOME (and GNOME-based sessions) | `gnome` | `gsettings set org.gnome.desktop.background picture-uri`, then `picture-uri-dark` (skipped quietly where the key does not exist) |
+| Cinnamon | `cinnamon` | `gsettings set org.cinnamon.desktop.background picture-uri` |
+| MATE | `mate` | `gsettings set org.mate.background picture-filename` |
+| KDE Plasma | `kde` | `plasma-apply-wallpaperimage` |
+| Xfce | `xfce` | `xfconf-query` on every `/backdrop/.../last-image` property of `xfce4-desktop` (every monitor and workspace) |
+| sway | `sway` | `swaymsg output * bg <file> fill` |
+
+Detection uses the OS, then `XDG_CURRENT_DESKTOP` (for example
+`ubuntu:GNOME` or `X-Cinnamon`), then `SWAYSOCK`. When none matches, `--set`
+stops with an error that names what it saw; pass `--desktop` to choose.
+
+Notes:
+
+- The path is always passed as a program argument, never spliced into a
+  shell line. On Windows it reaches PowerShell through the `WALLGEN_WALLPAPER`
+  environment variable, and the script itself is sent with `-EncodedCommand`.
+- sway joins its arguments into one command line (split on `;` and `,`) and
+  expands the file name the way a shell does, and KDE Plasma pastes the path
+  into a JavaScript string inside a `file://` URI. For those two, wallgen only
+  passes a path made of letters, digits, single spaces, and `- _ . / + @ : =`,
+  and otherwise asks you to write the image elsewhere with `-o`.
+- On sway the wallpaper lasts until sway restarts; put `output * bg ...` in
+  the sway config to keep it.
+- Xfce creates its `last-image` properties the first time a wallpaper is
+  picked in Desktop settings; wallgen says so if there are none yet.
+
 ## Daily wallpaper via cron
 
-Generate a fresh wallpaper every morning at 07:00 and set it (macOS):
+Generate a fresh wallpaper every morning at 07:00 and set it:
 
 ```cron
 0 7 * * * /usr/local/bin/wallgen --size 5k --output ~/Pictures/wallgen-today.png --set
 ```
 
-On Linux, drop `--set` and point your desktop environment at the generated file
-(for example with `feh`, `gsettings`, or your compositor's wallpaper tool).
-
-## Setting the wallpaper (macOS)
-
-```bash
-wallgen --size 5k --set
-```
-
-`--set` is macOS-only: after writing the file, wallgen asks System Events (via
-`osascript`) to set it as the wallpaper of every desktop. On any other OS the
-flag errors clearly and changes nothing. wallgen only ever touches your desktop
-when you pass `--set` explicitly.
+A cron job does not see your desktop session's environment, so on Linux give
+`--desktop` explicitly, and for `gsettings` also the session bus (for example
+`DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus`, with your own user
+id). On Windows, run the same command from Task Scheduler.
 
 ## Library
 
 The pure generation logic is a library; file writing and the `--set` side
-effect live in the binary.
+effect live in the binary. `wallgen::desktop` builds (but never runs) the
+commands for each desktop, so other programs can reuse them.
 
 ```rust
 use wallgen::{generate, palette, parse_size, Config, Style};

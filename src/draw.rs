@@ -66,6 +66,27 @@ pub fn fill_circle(img: &mut RgbaImage, cx: f32, cy: f32, r: f32, color: [u8; 3]
     }
 }
 
+/// Fill an antialiased disc: edge pixels are blended by their coverage.
+pub fn fill_disc_aa(img: &mut RgbaImage, cx: f32, cy: f32, r: f32, color: [u8; 3], alpha: f32) {
+    if r <= 0.0 {
+        return;
+    }
+    let x0 = (cx - r - 1.0).floor() as i64;
+    let x1 = (cx + r + 1.0).ceil() as i64;
+    let y0 = (cy - r - 1.0).floor() as i64;
+    let y1 = (cy + r + 1.0).ceil() as i64;
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            let dx = x as f32 + 0.5 - cx;
+            let dy = y as f32 + 0.5 - cy;
+            let coverage = (r - (dx * dx + dy * dy).sqrt() + 0.5).clamp(0.0, 1.0);
+            if coverage > 0.0 {
+                blend_px(img, x, y, color, alpha * coverage);
+            }
+        }
+    }
+}
+
 /// Fill an axis-aligned rectangle `[x0, x1) x [y0, y1)` with a solid color.
 pub fn fill_rect(img: &mut RgbaImage, x0: i64, y0: i64, x1: i64, y1: i64, color: [u8; 3]) {
     let (w, h) = (img.width() as i64, img.height() as i64);

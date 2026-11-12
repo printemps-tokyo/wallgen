@@ -2,8 +2,9 @@
 //!
 //! This layer resolves the configuration (including deriving today's date for
 //! the default seed), writes the encoded image, and — only behind the explicit
-//! `--set` flag — applies the wallpaper on macOS via `osascript`. All pixel
-//! generation happens in the library and never reads the clock.
+//! `--set` flag — runs the commands that apply the wallpaper (planned by
+//! [`wallgen::desktop`]). All pixel generation happens in the library and
+//! never reads the clock.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -13,16 +14,19 @@ use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use image::DynamicImage;
 
+use wallgen::desktop::{self, Desktop, Plan, Step};
 use wallgen::{
     civil_from_unix_days, date_to_seed, default_filename, generate, parse_date_seed, parse_size,
-    set_supported_on, styles, wallpaper_applescript, Config, Style, DEFAULT_SIZE,
+    set_supported_on, styles, Config, Style, DEFAULT_SIZE,
 };
 
 /// Generate deterministic generative-art wallpapers seeded by the date.
 #[derive(Parser, Debug)]
 #[command(name = "wallgen", version, about, long_about = None)]
 struct Cli {
-    /// Style: flow, voronoi, waves, bauhaus, or "random" (seed-chosen).
+    /// Style: flow, voronoi, waves, bauhaus, topo, truchet, mesh, circles,
+    /// "random" (seed-chosen from the first four, stable across versions), or
+    /// "any" (seed-chosen from every style).
     #[arg(long, default_value = "random")]
     style: String,
 
@@ -59,9 +63,19 @@ struct Cli {
     #[arg(long)]
     list_styles: bool,
 
-    /// macOS only: set the generated image as the desktop wallpaper.
+    /// Set the generated image as the desktop wallpaper (macOS, Windows,
+    /// GNOME, Cinnamon, MATE, KDE Plasma, Xfce, sway).
     #[arg(long)]
     set: bool,
+
+    /// With --set: the desktop to set instead of detecting it (macos,
+    /// windows, gnome, cinnamon, mate, kde, xfce, sway).
+    #[arg(long, value_name = "NAME")]
+    desktop: Option<String>,
+
+    /// Print the commands --set would run, without running them.
+    #[arg(long)]
+    show_set: bool,
 }
 
 fn main() -> Result<()> {
@@ -81,7 +95,12 @@ fn main() -> Result<()> {
     }
     if cli.list_styles {
         for s in Style::ALL {
-            println!("{:<8} {}", s.name(), s.describe());
+            let note = if Style::RANDOM_POOL.contains(s) {
+                ""
+            } else {
+                "  (not picked by --style random; use --style any)"
+            };
+            println!("{:<8} {}{note}", s.name(), s.describe());
         }
         return Ok(());
     }
@@ -125,6 +144,16 @@ fn main() -> Result<()> {
         palette,
     };
 
+    // Resolve the desktop before rendering so a bad --desktop fails fast.
+    let target = if cli.set || cli.show_set {
+        Some(resolve_desktop(cli.desktop.as_deref())?)
+    } else {
+        if cli.desktop.is_some() {
+            return Err(anyhow!("--desktop only applies with --set or --show-set"));
+        }
+        None
+    };
+
     let img = generate(&cfg);
 
     let (path, ext) = resolve_output(&cli, seed, style);
@@ -139,9 +168,19 @@ fn main() -> Result<()> {
         seed
     );
 
-    if cli.set {
-        set_wallpaper(&path)?;
-        eprintln!("wallgen: set as desktop wallpaper");
+    if let Some(target) = target {
+        // Use an absolute path so the desktop resolves it regardless of cwd.
+        let abs = std::fs::canonicalize(&path)
+            .with_context(|| format!("failed to resolve {}", path.display()))?;
+        let abs = display_path(&abs)?;
+        let plan = desktop::plan(target, &abs).map_err(|e| anyhow!(e))?;
+        if cli.show_set {
+            show_plan(&plan, &abs);
+        }
+        if cli.set {
+            run_plan(&plan, &abs)?;
+            eprintln!("wallgen: set as the {target} desktop wallpaper");
+        }
     }
 
     Ok(())
@@ -190,27 +229,137 @@ fn save_image(img: &image::RgbaImage, path: &Path, ext: &str) -> Result<()> {
     Ok(())
 }
 
-/// Apply the wallpaper on macOS. Guarded so it only ever runs behind `--set`
-/// and only on macOS; on any other OS it errors clearly without touching the
-/// desktop.
-fn set_wallpaper(path: &Path) -> Result<()> {
-    if !set_supported_on(std::env::consts::OS) {
-        return Err(anyhow!(
-            "--set is only supported on macOS (current OS: {})",
-            std::env::consts::OS
-        ));
+/// Pick the desktop: `--desktop` when given, else detect it from the OS and
+/// the session's environment.
+fn resolve_desktop(name: Option<&str>) -> Result<Desktop> {
+    let os = std::env::consts::OS;
+    if !set_supported_on(os) {
+        return Err(anyhow!("--set is not supported on {os}"));
     }
-    // Use an absolute path so System Events resolves it regardless of cwd.
-    let abs = std::fs::canonicalize(path)
-        .with_context(|| format!("failed to resolve {}", path.display()))?;
-    let script = wallpaper_applescript(&abs.to_string_lossy());
-    let status = Command::new("osascript")
-        .arg("-e")
-        .arg(&script)
-        .status()
-        .context("failed to run osascript")?;
-    if !status.success() {
-        return Err(anyhow!("osascript exited with {status}"));
+    if let Some(name) = name {
+        return Desktop::from_name(name).ok_or_else(|| {
+            anyhow!(
+                "unknown desktop: {name:?} (expected one of: {})",
+                desktop::names()
+            )
+        });
+    }
+    let xdg = std::env::var("XDG_CURRENT_DESKTOP").ok();
+    let swaysock = std::env::var_os("SWAYSOCK").is_some();
+    desktop::detect(os, xdg.as_deref(), swaysock).map_err(|e| anyhow!(e))
+}
+
+/// The path as the desktop should see it. On Windows, `canonicalize` returns
+/// a `\\?\` verbatim path, which the wallpaper API does not need. A path that
+/// is not valid Unicode is refused rather than passed on altered.
+fn display_path(path: &Path) -> Result<String> {
+    let s = path.to_str().ok_or_else(|| {
+        anyhow!(
+            "the output path {} is not valid Unicode; write the image elsewhere with -o",
+            path.display()
+        )
+    })?;
+    Ok(match s.strip_prefix(r"\\?\") {
+        Some(rest) if !rest.starts_with("UNC\\") => rest.to_string(),
+        _ => s.to_string(),
+    })
+}
+
+fn show_plan(plan: &Plan, path: &str) {
+    let show = |step: &Step| {
+        let env: String = step
+            .env
+            .iter()
+            .map(|(k, v)| format!("{k}={v:?} "))
+            .collect();
+        let optional = if step.required { "" } else { "  (optional)" };
+        println!(
+            "{env}{} {}{optional}",
+            step.program,
+            shell_words(&step.args)
+        );
+    };
+    match plan {
+        Plan::Run(steps) => steps.iter().for_each(show),
+        Plan::Xfce => {
+            show(&desktop::xfce_list_step());
+            println!("# then, for each /backdrop/.../last-image property:\n{}", {
+                let step = desktop::xfce_set_step("<property>", path);
+                format!("{} {}", step.program, shell_words(&step.args))
+            });
+        }
+    }
+}
+
+fn shell_words(args: &[String]) -> String {
+    args.iter()
+        .map(|a| {
+            if !a.is_empty()
+                && a.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"-_./:=+,@%".contains(&b))
+            {
+                a.clone()
+            } else {
+                format!("'{}'", a.replace('\'', "'\\''"))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Run a plan. Optional steps may fail; required ones may not.
+fn run_plan(plan: &Plan, path: &str) -> Result<()> {
+    match plan {
+        Plan::Run(steps) => {
+            for step in steps {
+                run_step(step)?;
+            }
+        }
+        Plan::Xfce => {
+            let list = desktop::xfce_list_step();
+            let output = command(&list)
+                .output()
+                .with_context(|| format!("failed to run {}", list.program))?;
+            if !output.status.success() {
+                return Err(anyhow!("{} exited with {}", list.program, output.status));
+            }
+            let props = desktop::xfce_image_properties(&String::from_utf8_lossy(&output.stdout));
+            if props.is_empty() {
+                return Err(anyhow!(
+                    "xfce4-desktop has no /backdrop/.../last-image property yet; \
+                     pick any wallpaper once in Desktop settings, then retry"
+                ));
+            }
+            for prop in props {
+                run_step(&desktop::xfce_set_step(&prop, path))?;
+            }
+        }
     }
     Ok(())
+}
+
+fn command(step: &Step) -> Command {
+    let mut cmd = Command::new(&step.program);
+    cmd.args(&step.args);
+    for (key, value) in &step.env {
+        cmd.env(key, value);
+    }
+    cmd
+}
+
+fn run_step(step: &Step) -> Result<()> {
+    let status = command(step).status();
+    match status {
+        Ok(status) if status.success() => Ok(()),
+        _ if !step.required => {
+            eprintln!(
+                "wallgen: optional step `{} {}` did not succeed; continuing",
+                step.program,
+                shell_words(&step.args)
+            );
+            Ok(())
+        }
+        Ok(status) => Err(anyhow!("{} exited with {status}", step.program)),
+        Err(e) => Err(anyhow!("failed to run {}: {e}", step.program)),
+    }
 }

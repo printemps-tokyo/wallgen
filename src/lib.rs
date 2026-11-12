@@ -10,6 +10,7 @@
 //! fully-resolved [`Config`] and returns an [`image::RgbaImage`]. File writing,
 //! argument parsing, and the macOS `--set` side effect live in the binary.
 
+pub mod desktop;
 pub mod draw;
 pub mod noise;
 pub mod palette;
@@ -177,11 +178,15 @@ pub fn default_filename(seed: u64, style: Style, ext: &str) -> String {
     format!("wallgen-{seed:08}-{}.{ext}", style.name())
 }
 
-/// Whether `--set` is supported on the given OS string (as from
-/// [`std::env::consts::OS`]). Only macOS is supported. Split out so the guard is
-/// unit-testable without executing anything.
+/// Whether `--set` can work on the given OS string (as from
+/// [`std::env::consts::OS`]): macOS, Windows, and Linux or BSD desktops that
+/// [`desktop::detect`] recognizes. Split out so the guard is unit-testable
+/// without executing anything.
 pub fn set_supported_on(os: &str) -> bool {
-    os == "macos"
+    matches!(
+        os,
+        "macos" | "windows" | "linux" | "freebsd" | "openbsd" | "netbsd" | "dragonfly"
+    )
 }
 
 /// Build the AppleScript that sets `path` as the wallpaper of every desktop.
@@ -251,10 +256,12 @@ mod tests {
     }
 
     #[test]
-    fn set_supported_only_macos() {
+    fn set_supported_on_desktop_systems() {
         assert!(set_supported_on("macos"));
-        assert!(!set_supported_on("linux"));
-        assert!(!set_supported_on("windows"));
+        assert!(set_supported_on("linux"));
+        assert!(set_supported_on("windows"));
+        assert!(!set_supported_on("ios"));
+        assert!(!set_supported_on("android"));
     }
 
     #[test]

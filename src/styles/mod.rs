@@ -2,11 +2,20 @@
 //!
 //! Each variant of [`Style`] lives in its own submodule and exposes a
 //! `render(size, seed, palette) -> RgbaImage` function. Adding a style means
-//! adding a module, an enum variant, and a match arm; the CLI and library pick
-//! it up through [`Style::ALL`] and [`Style::render`].
+//! adding a module, an enum variant (at the end, so earlier styles keep their
+//! RNG streams), and a match arm; the CLI and library pick it up through
+//! [`Style::ALL`] and [`Style::render`].
+//!
+//! `--style random` draws only from [`Style::RANDOM_POOL`], the styles of the
+//! first release, so a date's wallpaper stays the same across versions.
+//! `--style any` draws from every style and changes when styles are added.
 
 pub mod bauhaus;
+pub mod circles;
 pub mod flow;
+pub mod mesh;
+pub mod topo;
+pub mod truchet;
 pub mod voronoi;
 pub mod waves;
 
@@ -29,11 +38,33 @@ pub enum Style {
     Waves,
     /// Bauhaus-inspired grid of bold geometric shapes.
     Bauhaus,
+    /// Topographic map: elevation bands and contour lines.
+    Topo,
+    /// Truchet tiles: quarter-circle arcs that link into winding paths.
+    Truchet,
+    /// Soft mesh gradient of blended color blobs.
+    Mesh,
+    /// Circle packing.
+    Circles,
 }
 
 impl Style {
     /// Every concrete style, in a stable order.
-    pub const ALL: &'static [Style] = &[Style::Flow, Style::Voronoi, Style::Waves, Style::Bauhaus];
+    pub const ALL: &'static [Style] = &[
+        Style::Flow,
+        Style::Voronoi,
+        Style::Waves,
+        Style::Bauhaus,
+        Style::Topo,
+        Style::Truchet,
+        Style::Mesh,
+        Style::Circles,
+    ];
+
+    /// The styles `--style random` chooses from. Frozen at the first release
+    /// so a given seed keeps its wallpaper as styles are added.
+    pub const RANDOM_POOL: &'static [Style] =
+        &[Style::Flow, Style::Voronoi, Style::Waves, Style::Bauhaus];
 
     /// The style's canonical lowercase name.
     pub fn name(self) -> &'static str {
@@ -42,6 +73,10 @@ impl Style {
             Style::Voronoi => "voronoi",
             Style::Waves => "waves",
             Style::Bauhaus => "bauhaus",
+            Style::Topo => "topo",
+            Style::Truchet => "truchet",
+            Style::Mesh => "mesh",
+            Style::Circles => "circles",
         }
     }
 
@@ -52,20 +87,32 @@ impl Style {
             Style::Voronoi => "colored Voronoi cells with soft shading",
             Style::Waves => "interference of several sine wave fields",
             Style::Bauhaus => "grid of bold geometric shapes",
+            Style::Topo => "topographic map with contour lines",
+            Style::Truchet => "Truchet tiles of linked quarter-circle arcs",
+            Style::Mesh => "soft mesh gradient of blended color blobs",
+            Style::Circles => "circle packing with concentric accents",
         }
     }
 
-    /// Parse a style name. `"random"` picks one deterministically from `seed`.
+    /// Parse a style name. `"random"` picks one of [`Style::RANDOM_POOL`]
+    /// from `seed`; `"any"` picks one of [`Style::ALL`].
     pub fn parse(name: &str, seed: u64) -> Option<Style> {
         let n = name.trim().to_ascii_lowercase();
-        if n == "random" {
-            return Some(Style::pick_random(seed));
+        match n.as_str() {
+            "random" => Some(Style::pick_random(seed)),
+            "any" => Some(Style::pick_any(seed)),
+            _ => Style::ALL.iter().copied().find(|s| s.name() == n),
         }
-        Style::ALL.iter().copied().find(|s| s.name() == n)
     }
 
-    /// Deterministically choose a style from the seed.
+    /// Deterministically choose a style from [`Style::RANDOM_POOL`].
     pub fn pick_random(seed: u64) -> Style {
+        let mut rng = Rng::new(mix(seed, DOMAIN_STYLE));
+        Style::RANDOM_POOL[rng.index(Style::RANDOM_POOL.len())]
+    }
+
+    /// Deterministically choose a style from every style.
+    pub fn pick_any(seed: u64) -> Style {
         let mut rng = Rng::new(mix(seed, DOMAIN_STYLE));
         Style::ALL[rng.index(Style::ALL.len())]
     }
@@ -77,6 +124,10 @@ impl Style {
             Style::Voronoi => voronoi::render(size, seed, palette),
             Style::Waves => waves::render(size, seed, palette),
             Style::Bauhaus => bauhaus::render(size, seed, palette),
+            Style::Topo => topo::render(size, seed, palette),
+            Style::Truchet => truchet::render(size, seed, palette),
+            Style::Mesh => mesh::render(size, seed, palette),
+            Style::Circles => circles::render(size, seed, palette),
         }
     }
 }
@@ -113,6 +164,25 @@ mod tests {
             assert_eq!(a, b);
             assert!(Style::ALL.contains(&a));
         }
+    }
+
+    #[test]
+    fn random_pool_is_frozen_and_any_reaches_new_styles() {
+        assert_eq!(Style::RANDOM_POOL, &Style::ALL[..4]);
+        // Known picks from the first release must not change.
+        for (seed, style) in [
+            (20261101u64, Style::Waves),
+            (20261102, Style::Flow),
+            (20261104, Style::Voronoi),
+            (20261108, Style::Bauhaus),
+        ] {
+            assert_eq!(Style::parse("random", seed), Some(style), "seed {seed}");
+        }
+        let mut seen = std::collections::HashSet::new();
+        for seed in 0..500u64 {
+            seen.insert(Style::pick_any(seed));
+        }
+        assert_eq!(seen.len(), Style::ALL.len());
     }
 
     #[test]
